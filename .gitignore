@@ -78,3 +78,5 @@ Thumbs.db
 *.bak
 *.tmp
 *.orig
+
+openapi.json
