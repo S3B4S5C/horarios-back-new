@@ -1,0 +1,519 @@
+# users
+
+from django.db import models
+from django.conf import settings
+
+
+class UserRole(models.TextChoices):
+    JEFE_CARRERA   = "JEFE_CARRERA", "Jefe de Carrera"
+    VICERRECTORADO = "VICERRECTORADO", "Vicerrectorado"
+    RECTOR         = "RECTOR", "Rector"
+    DOCENTE        = "DOCENTE", "Docente"
+    ESTUDIANTE     = "ESTUDIANTE", "Estudiante"
+
+
+class UserProfile(models.Model):
+    """
+    Perfil 1:1 del User estándar de Django con rol ÚNICO.
+    Permite guardar, si quieres, un JSON simple para menú por rol.
+    """
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile"
+    )
+    role = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.ESTUDIANTE)
+    permisos = models.JSONField(default=dict, blank=True)  # opcional para menú
+
+    class Meta:
+        verbose_name = "Perfil de Usuario"
+        verbose_name_plural = "Perfiles de Usuario"
+        indexes = [models.Index(fields=["role"])]
+
+    def __str__(self):
+        return f"{self.user.username} · {self.role}"
+
+
+class Docente(models.Model):
+    """Datos propios del docente (usado para disponibilidad y carga)."""
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="docente"
+    )
+    nombre_completo = models.CharField(max_length=180)
+    especialidad = models.CharField(max_length=120, blank=True)
+    carga_min_semanal = models.PositiveSmallIntegerField(default=0)
+    carga_max_semanal = models.PositiveSmallIntegerField(default=0)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Docente"
+        verbose_name_plural = "Docentes"
+        constraints = [
+            models.CheckConstraint(
+                name="docente_carga_max_ge_min",
+                check=models.Q(carga_max_semanal__gte=models.F("carga_min_semanal")),
+            )
+        ]
+
+    def __str__(self):
+        return self.nombre_completo
+
+
+class Estudiante(models.Model):
+    """Datos propios del estudiante."""
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="estudiante"
+    )
+    nombre_completo = models.CharField(max_length=180)
+    matricula = models.CharField(max_length=30, unique=True)
+
+    class Meta:
+        verbose_name = "Estudiante"
+        verbose_name_plural = "Estudiantes"
+        indexes = [models.Index(fields=["matricula"])]
+
+    def __str__(self):
+        return f"{self.nombre_completo} · {self.matricula}"
+
+
+# academics
+
+from django.db import models
+from django.conf import settings
+
+
+class Carrera(models.Model):
+    sigla = models.CharField(max_length=20, unique=True)
+    nombre = models.CharField(max_length=160)
+    # Jefe de carrera (usuario estándar con role=JEFE_CARRERA)
+    jefe = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="carreras_dirigidas"
+    )
+
+    class Meta:
+        verbose_name = "Carrera"
+        verbose_name_plural = "Carreras"
+
+    def __str__(self):
+        return f"{self.sigla} - {self.nombre}"
+
+
+class TipoAmbiente(models.Model):
+    """Se deja aquí para que Asignatura pueda referenciarlo sin importar orden de apps."""
+    nombre = models.CharField(max_length=80, unique=True)  # Aula, Lab, Auditorio...
+    descripcion = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        verbose_name = "Tipo de Ambiente"
+        verbose_name_plural = "Tipos de Ambiente"
+
+    def __str__(self):
+        return self.nombre
+
+
+class Asignatura(models.Model):
+    carrera = models.ForeignKey(Carrera, on_delete=models.CASCADE, related_name="asignaturas")
+    codigo = models.CharField(max_length=30)
+    nombre = models.CharField(max_length=180)
+    horas_teoria_semana = models.PositiveSmallIntegerField(default=0)
+    horas_practica_semana = models.PositiveSmallIntegerField(default=0)
+    # Compatibilidad de ambientes (opcional)
+    tipo_ambiente_teoria = models.ForeignKey(
+        "academics.TipoAmbiente", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="asignaturas_teoria"
+    )
+    tipo_ambiente_practica = models.ForeignKey(
+        "academics.TipoAmbiente", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="asignaturas_practica"
+    )
+
+    class Meta:
+        verbose_name = "Asignatura"
+        verbose_name_plural = "Asignaturas"
+        constraints = [
+            models.UniqueConstraint(fields=["carrera", "codigo"], name="asignatura_codigo_unico_por_carrera")
+        ]
+
+    def __str__(self):
+        return f"{self.codigo} - {self.nombre}"
+
+
+class Periodo(models.Model):
+    gestion = models.PositiveIntegerField(help_text="Año, p.ej. 2025")
+    numero = models.PositiveSmallIntegerField(help_text="1 o 2")
+    fecha_inicio = models.DateField()
+    fecha_fin = models.DateField()
+
+    class Meta:
+        verbose_name = "Periodo Académico"
+        verbose_name_plural = "Periodos Académicos"
+        constraints = [
+            models.UniqueConstraint(fields=["gestion", "numero"], name="periodo_gestion_numero_unico")
+        ]
+
+    def __str__(self):
+        return f"{self.gestion}/{self.numero}"
+
+
+class Turno(models.Model):
+    nombre = models.CharField(max_length=40, unique=True)  # Mañana / Tarde / Noche
+
+    class Meta:
+        verbose_name = "Turno"
+        verbose_name_plural = "Turnos"
+
+    def __str__(self):
+        return self.nombre
+
+
+class Grupo(models.Model):
+    class Estado(models.TextChoices):
+        BORRADOR = "borrador", "Borrador"
+        CONFIRMADO = "confirmado", "Confirmado"
+        CERRADO = "cerrado", "Cerrado"
+
+    asignatura = models.ForeignKey(Asignatura, on_delete=models.CASCADE, related_name="grupos")
+    periodo = models.ForeignKey(Periodo, on_delete=models.CASCADE, related_name="grupos")
+    turno = models.ForeignKey(Turno, on_delete=models.PROTECT, related_name="grupos")
+    docente = models.ForeignKey("users.Docente", on_delete=models.PROTECT, related_name="grupos")
+    codigo = models.CharField(max_length=10)  # A1, A2, B1, B2...
+    capacidad = models.PositiveIntegerField(default=40)
+    estado = models.CharField(max_length=12, choices=Estado.choices, default=Estado.BORRADOR)
+
+    class Meta:
+        verbose_name = "Grupo"
+        verbose_name_plural = "Grupos"
+        constraints = [
+            models.UniqueConstraint(fields=["asignatura", "periodo", "codigo"], name="grupo_unico_por_asig_periodo_cod")
+        ]
+        indexes = [models.Index(fields=["periodo", "asignatura", "turno"])]
+
+    def __str__(self):
+        return f"{self.asignatura.codigo}-{self.codigo} ({self.periodo} · {self.turno})"
+
+
+class Preinscripcion(models.Model):
+    """
+    Demanda previa por asignatura/turno antes de crear grupos efectivos.
+    Sirve para aplicar la regla 1 grupo por cada 25 preinscritos.
+    """
+    periodo = models.ForeignKey(Periodo, on_delete=models.CASCADE, related_name="preinscripciones")
+    asignatura = models.ForeignKey(Asignatura, on_delete=models.CASCADE, related_name="preinscripciones")
+    turno = models.ForeignKey(Turno, on_delete=models.PROTECT, related_name="preinscripciones")
+    estudiante = models.ForeignKey("users.Estudiante", on_delete=models.CASCADE, related_name="preinscripciones")
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Preinscripción"
+        verbose_name_plural = "Preinscripciones"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["periodo", "asignatura", "turno", "estudiante"], name="preinscripcion_unica"
+            )
+        ]
+        indexes = [models.Index(fields=["periodo", "asignatura", "turno"])]
+
+    def __str__(self):
+        return f"Pre-{self.estudiante} {self.asignatura.codigo} ({self.turno})"
+
+
+class Inscripcion(models.Model):
+    """Inscripción real del estudiante a un grupo confirmado."""
+    grupo = models.ForeignKey(Grupo, on_delete=models.CASCADE, related_name="inscripciones")
+    estudiante = models.ForeignKey("users.Estudiante", on_delete=models.CASCADE, related_name="inscripciones")
+    fecha = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Inscripción"
+        verbose_name_plural = "Inscripciones"
+        constraints = [
+            models.UniqueConstraint(fields=["grupo", "estudiante"], name="inscripcion_unica")
+        ]
+        indexes = [models.Index(fields=["estudiante"]), models.Index(fields=["grupo"])]
+
+    def __str__(self):
+        return f"{self.estudiante} → {self.grupo}"
+
+
+# facilities
+
+from django.db import models
+
+
+class Edificio(models.Model):
+    codigo = models.CharField(max_length=30, unique=True)
+    nombre = models.CharField(max_length=120)
+    ubicacion = models.CharField(max_length=160, blank=True)
+
+    class Meta:
+        verbose_name = "Edificio"
+        verbose_name_plural = "Edificios"
+        indexes = [models.Index(fields=["codigo"])]
+
+    def __str__(self):
+        return f"{self.codigo} - {self.nombre}"
+
+
+class TipoAmbiente(models.Model):
+    nombre = models.CharField(max_length=80, unique=True)  # Aula, Laboratorio, Auditorio...
+    descripcion = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        verbose_name = "Tipo de Ambiente"
+        verbose_name_plural = "Tipos de Ambiente"
+
+    def __str__(self):
+        return self.nombre
+
+
+class Ambiente(models.Model):
+    edificio = models.ForeignKey(Edificio, on_delete=models.CASCADE, related_name="ambientes")
+    tipo_ambiente = models.ForeignKey(TipoAmbiente, on_delete=models.PROTECT, related_name="ambientes")
+    codigo = models.CharField(max_length=30)  # ej: A-101
+    nombre = models.CharField(max_length=120, blank=True)
+    capacidad = models.PositiveIntegerField()
+
+    class Meta:
+        verbose_name = "Ambiente"
+        verbose_name_plural = "Ambientes"
+        constraints = [
+            models.UniqueConstraint(fields=["edificio", "codigo"], name="ambiente_codigo_unico_por_edificio")
+        ]
+        indexes = [models.Index(fields=["tipo_ambiente"]), models.Index(fields=["capacidad"])]
+
+    def __str__(self):
+        return f"{self.edificio.codigo}-{self.codigo} ({self.tipo_ambiente})"
+
+
+# scheduling
+
+from django.db import models
+from django.utils import timezone
+
+
+class Calendario(models.Model):
+    """
+    Calendario por periodo con bloques; duracion_bloque_min suele ser 45 (horas académicas).
+    """
+    periodo = models.ForeignKey("academics.Periodo", on_delete=models.CASCADE, related_name="calendarios")
+    nombre = models.CharField(max_length=80, default="Calendario")
+    duracion_bloque_min = models.PositiveSmallIntegerField(default=45)
+
+    class Meta:
+        verbose_name = "Calendario"
+        verbose_name_plural = "Calendarios"
+
+    def __str__(self):
+        return f"{self.nombre} · {self.periodo}"
+
+
+class Bloque(models.Model):
+    calendario = models.ForeignKey(Calendario, on_delete=models.CASCADE, related_name="bloques")
+    orden = models.PositiveSmallIntegerField()
+    hora_inicio = models.TimeField()
+    hora_fin = models.TimeField()
+    duracion_min = models.PositiveSmallIntegerField()
+
+    class Meta:
+        verbose_name = "Bloque"
+        verbose_name_plural = "Bloques"
+        constraints = [
+            models.UniqueConstraint(fields=["calendario", "orden"], name="bloque_orden_unico_por_calendario")
+        ]
+        ordering = ("calendario", "orden")
+        indexes = [models.Index(fields=["calendario", "orden"])]
+
+    def __str__(self):
+        return f"{self.calendario} · #{self.orden} ({self.hora_inicio}-{self.hora_fin})"
+
+
+class DiaSemana(models.IntegerChoices):
+    LUNES = 1, "Lunes"
+    MARTES = 2, "Martes"
+    MIERCOLES = 3, "Miércoles"
+    JUEVES = 4, "Jueves"
+    VIERNES = 5, "Viernes"
+    SABADO = 6, "Sábado"
+    DOMINGO = 7, "Domingo"
+
+
+class DisponibilidadDocente(models.Model):
+    """
+    Disponibilidad por docente, día y bloque de un calendario (periodo específico).
+    """
+    docente = models.ForeignKey("users.Docente", on_delete=models.CASCADE, related_name="disponibilidades")
+    calendario = models.ForeignKey(Calendario, on_delete=models.CASCADE, related_name="disponibilidades_docente")
+    day_of_week = models.PositiveSmallIntegerField(choices=DiaSemana.choices)
+    bloque_inicio = models.ForeignKey(Bloque, on_delete=models.PROTECT, related_name="disponibilidades_inicio")
+    bloques_duracion = models.PositiveSmallIntegerField(default=1)
+    preferencia = models.IntegerField(default=0)  # peso para tu optimizador
+
+    class Meta:
+        verbose_name = "Disponibilidad Docente"
+        verbose_name_plural = "Disponibilidades Docentes"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["docente", "calendario", "day_of_week", "bloque_inicio"],
+                name="disp_docente_unica_por_cal_dia_bloque",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["docente", "calendario", "day_of_week"]),
+            models.Index(fields=["bloque_inicio"]),
+        ]
+
+    def __str__(self):
+        return f"{self.docente} · {self.get_day_of_week_display()} #{self.bloque_inicio.orden} x{self.bloques_duracion}"
+
+
+class Clase(models.Model):
+    """
+    Unidad programada (una sesión). Mueve/drag&drop actualizando day_of_week/bloque_inicio/bloques_duracion.
+    """
+    class Tipo(models.TextChoices):
+        TEORIA = "T", "Teoría"
+        PRACTICA = "P", "Práctica"
+
+    class Estado(models.TextChoices):
+        PROPUESTO = "propuesto", "Propuesto"
+        CONFIRMADO = "confirmado", "Confirmado"
+        CANCELADO = "cancelado", "Cancelado"
+
+    grupo = models.ForeignKey("academics.Grupo", on_delete=models.CASCADE, related_name="clases")
+    tipo = models.CharField(max_length=1, choices=Tipo.choices)
+    day_of_week = models.PositiveSmallIntegerField(choices=DiaSemana.choices)
+    bloque_inicio = models.ForeignKey(Bloque, on_delete=models.PROTECT, related_name="clases_inicio")
+    bloques_duracion = models.PositiveSmallIntegerField(default=1)
+
+    ambiente = models.ForeignKey("facilities.Ambiente", on_delete=models.PROTECT, related_name="clases")
+    docente = models.ForeignKey("users.Docente", on_delete=models.PROTECT, related_name="clases")  # permite sustituto
+
+    estado = models.CharField(max_length=12, choices=Estado.choices, default=Estado.PROPUESTO)
+    creado_en = models.DateTimeField(default=timezone.now)
+    confirmado_en = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Clase"
+        verbose_name_plural = "Clases"
+        indexes = [
+            models.Index(fields=["day_of_week", "bloque_inicio"]),
+            models.Index(fields=["docente", "day_of_week", "bloque_inicio"]),
+            models.Index(fields=["ambiente", "day_of_week", "bloque_inicio"]),
+            models.Index(fields=["grupo", "day_of_week", "bloque_inicio"]),
+        ]
+        constraints = [
+            # Evita duplicar exacta misma clase por grupo en mismo bloque/día
+            models.UniqueConstraint(
+                fields=["grupo", "day_of_week", "bloque_inicio"],
+                name="clase_unica_por_grupo_dia_bloque",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.grupo} {self.get_tipo_display()} · {self.get_day_of_week_display()} #{self.bloque_inicio.orden}"
+
+
+class CambioHorario(models.Model):
+    """
+    Historial de reprogramaciones (drag&drop o sustitución).
+    """
+    clase = models.ForeignKey(Clase, on_delete=models.CASCADE, related_name="cambios")
+    usuario = models.ForeignKey(
+        "auth.User", on_delete=models.SET_NULL, null=True, related_name="cambios_horario"
+    )
+    motivo = models.CharField(max_length=255, blank=True)
+
+    old_day_of_week = models.PositiveSmallIntegerField(choices=DiaSemana.choices, null=True, blank=True)
+    old_bloque_inicio = models.ForeignKey(
+        Bloque, null=True, blank=True, on_delete=models.SET_NULL, related_name="cambios_old_inicio"
+    )
+    old_bloques_duracion = models.PositiveSmallIntegerField(null=True, blank=True)
+    old_ambiente = models.ForeignKey(
+        "facilities.Ambiente", null=True, blank=True, on_delete=models.SET_NULL, related_name="cambios_old_ambiente"
+    )
+    old_docente = models.ForeignKey(
+        "users.Docente", null=True, blank=True, on_delete=models.SET_NULL, related_name="cambios_old_docente"
+    )
+
+    new_day_of_week = models.PositiveSmallIntegerField(choices=DiaSemana.choices, null=True, blank=True)
+    new_bloque_inicio = models.ForeignKey(
+        Bloque, null=True, blank=True, on_delete=models.SET_NULL, related_name="cambios_new_inicio"
+    )
+    new_bloques_duracion = models.PositiveSmallIntegerField(null=True, blank=True)
+    new_ambiente = models.ForeignKey(
+        "facilities.Ambiente", null=True, blank=True, on_delete=models.SET_NULL, related_name="cambios_new_ambiente"
+    )
+    new_docente = models.ForeignKey(
+        "users.Docente", null=True, blank=True, on_delete=models.SET_NULL, related_name="cambios_new_docente"
+    )
+
+    fecha = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        verbose_name = "Cambio de Horario"
+        verbose_name_plural = "Cambios de Horario"
+        ordering = ("-fecha",)
+
+    def __str__(self):
+        return f"Cambio {self.clase_id} · {self.fecha:%Y-%m-%d %H:%M}"
+
+
+class ConflictoHorario(models.Model):
+    """
+    Registro de choques detectados antes de confirmar (docente, ambiente o grupo).
+    """
+    class Tipo(models.TextChoices):
+        DOCENTE = "DOCENTE", "Docente"
+        AMBIENTE = "AMBIENTE", "Ambiente"
+        GRUPO = "GRUPO", "Grupo"
+
+    tipo = models.CharField(max_length=8, choices=Tipo.choices)
+    clase_a = models.ForeignKey(Clase, on_delete=models.CASCADE, related_name="conflictos_como_a")
+    clase_b = models.ForeignKey(Clase, on_delete=models.CASCADE, related_name="conflictos_como_b")
+    resuelto = models.BooleanField(default=False)
+    nota = models.CharField(max_length=255, blank=True)
+    detectado_en = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        verbose_name = "Conflicto de Horario"
+        verbose_name_plural = "Conflictos de Horario"
+        indexes = [
+            models.Index(fields=["tipo", "resuelto"]),
+            models.Index(fields=["clase_a"]),
+            models.Index(fields=["clase_b"]),
+        ]
+
+    def __str__(self):
+        status = "OK" if self.resuelto else "PEND"
+        return f"[{status}] {self.tipo} {self.clase_a_id} vs {self.clase_b_id}"
+
+
+# notifications 
+
+from django.db import models
+from django.utils import timezone
+from django.conf import settings
+
+
+class Notificacion(models.Model):
+    """
+    Mensaje a usuarios afectados por cambios o confirmaciones de horario.
+    """
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notificaciones"
+    )
+    clase = models.ForeignKey(
+        "scheduling.Clase", on_delete=models.SET_NULL, null=True, blank=True, related_name="notificaciones"
+    )
+
+    titulo = models.CharField(max_length=160)
+    mensaje = models.TextField()
+    leida = models.BooleanField(default=False)
+    creada_en = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        verbose_name = "Notificación"
+        verbose_name_plural = "Notificaciones"
+        ordering = ("-creada_en",)
+
+    def __str__(self):
+        return f"{self.titulo} → {self.usuario.username}"
