@@ -16,7 +16,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 class DocenteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Docente
-        fields = ["id", "nombre_completo", "especialidad", "carga_min_semanal", "carga_max_semanal", "activo"]
+        fields = ["id", "user","nombre_completo", "especialidad", "carga_min_semanal", "carga_max_semanal", "activo"]
 
 
 class EstudianteSerializer(serializers.ModelSerializer):

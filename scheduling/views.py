@@ -130,7 +130,6 @@ def bloques_delete_view(request, pk: int):
     responses={200: DisponibilidadDocenteSerializer(many=True)}
 )
 @api_view(["GET"])
-@permission_classes([IsAuthenticated, IsTeacherOrManager])
 def disponibilidad_list_view(request):
     qs = DisponibilidadDocente.objects.select_related("docente","calendario","bloque_inicio").all()
     # visibilidad: docentes ven sólo las suyas
@@ -146,7 +145,6 @@ def disponibilidad_list_view(request):
 
 @extend_schema(tags=["disponibilidad"], request=DisponibilidadDocenteSerializer, responses={201: DisponibilidadDocenteSerializer})
 @api_view(["POST"])
-@permission_classes([IsAuthenticated, IsTeacherOrManager])
 def disponibilidad_create_view(request):
     data = request.data.copy()
     # Si es docente, forzar su propio docente_id
@@ -159,7 +157,6 @@ def disponibilidad_create_view(request):
 
 @extend_schema(tags=["disponibilidad"], request=DisponibilidadDocenteSerializer, responses={200: DisponibilidadDocenteSerializer})
 @api_view(["PUT", "PATCH"])
-@permission_classes([IsAuthenticated, IsTeacherOrManager])
 def disponibilidad_update_view(request, pk: int):
     try:
         obj = DisponibilidadDocente.objects.get(pk=pk)
@@ -175,7 +172,6 @@ def disponibilidad_update_view(request, pk: int):
 
 @extend_schema(tags=["disponibilidad"], responses={204: None})
 @api_view(["DELETE"])
-@permission_classes([IsAuthenticated, IsTeacherOrManager])
 def disponibilidad_delete_view(request, pk: int):
     try:
         obj = DisponibilidadDocente.objects.get(pk=pk)
@@ -194,7 +190,6 @@ def disponibilidad_delete_view(request, pk: int):
     examples=[OpenApiExample("CSV ejemplo (cabeceras)", value="docente,calendario,day_of_week,bloque_inicio,bloques_duracion,preferencia\n12,1,1,3,2,1")],
 )
 @api_view(["POST"])
-@permission_classes([IsAuthenticated, IsManagerOrStaff])
 @parser_classes([MultiPartParser])
 def disponibilidad_import_csv_view(request):
     """

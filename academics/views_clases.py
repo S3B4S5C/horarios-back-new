@@ -1,16 +1,17 @@
-import calendar
 from typing import List, Dict, Any
 
 from django.db import transaction, IntegrityError
-from django.db.models import Sum, F, Case, When, IntegerField
-from django.db.models.functions import Coalesce
+from django.db.models import Sum, F, Case, When, IntegerField, ExpressionWrapper, Value, FloatField, Q
+from django.db.models.functions import Coalesce, Cast
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 # from rest_framework.permissions import IsAuthenticated
-
 from drf_spectacular.utils import (
-    extend_schema, OpenApiParameter, OpenApiTypes, OpenApiResponse
+    extend_schema,
+    OpenApiParameter,
+    OpenApiTypes,
+    OpenApiResponse,
 )
 
 from academics.models import Grupo
@@ -38,11 +39,13 @@ class GrupoPlanificacionListAPIView(APIView):
         calendario = request.query_params.get("calendario")
         tolerancia_min = int(request.query_params.get("tolerancia_min") or 0)
 
-        qs = Grupo.objects.select_related("asignatura", "periodo", "turno").all()
+        qs = (Grupo.objects
+              .select_related("asignatura", "periodo", "turno")
+              .all())
 
-        # Filtros opcionales (id o código/nombre)
+        # -------- Filtros básicos (sin tocar la relación 'clases') --------
         if periodo:
-            qs = qs.filter(periodo_id=periodo)
+            qs = qs.filter(periodo_id=int(periodo))
 
         if asignatura:
             if asignatura.isdigit():
@@ -56,75 +59,95 @@ class GrupoPlanificacionListAPIView(APIView):
             else:
                 qs = qs.filter(turno__nombre__iexact=str(turno))
 
+        # -------- Filtros condicionales para usarlos DENTRO de las agregaciones --------
+        cal_q = Q()
         if calendario:
             try:
-                cal = Calendario.objects.only("periodo_id").get(pk=int(calendario))
+                cal_id = int(calendario)
+                cal = Calendario.objects.only("id", "periodo_id").get(pk=cal_id)
             except (ValueError, Calendario.DoesNotExist):
                 return Response({"detail": "calendario inválido."}, status=400)
+            # alineamos por periodo, pero NO filtramos por clases aquí
             qs = qs.filter(periodo_id=cal.periodo_id)
+            cal_q = Q(clases__bloque_inicio__calendario_id=cal.id)
 
-
-        # Filtros adicionales
+        tol_q = Q()
         if tolerancia_min:
-            qs = qs.filter(clases__bloque_inicio__duracion_min__gte=tolerancia_min)
+            tol_q = Q(clases__bloque_inicio__duracion_min__gte=tolerancia_min)
 
-        # Agregaciones por tipo T/P
-        # minutos = sum(bloques_duracion * bloque_inicio.duracion_min)
-        minutos_expr = F("clases__bloque_inicio__duracion_min") * F("clases__bloques_duracion")
-
-        qs = qs.annotate(
-            bloques_teo=Coalesce(Sum(Case(
-                When(clases__tipo="T", then=F("clases__bloques_duracion")),
-                default=0, output_field=IntegerField()
-            )), 0),
-            bloques_pra=Coalesce(Sum(Case(
-                When(clases__tipo="P", then=F("clases__bloques_duracion")),
-                default=0, output_field=IntegerField()
-            )), 0),
-            minutos_teo=Coalesce(Sum(Case(
-                When(clases__tipo="T", then=minutos_expr),
-                default=0, output_field=IntegerField()
-            )), 0),
-            minutos_pra=Coalesce(Sum(Case(
-                When(clases__tipo="P", then=minutos_expr),
-                default=0, output_field=IntegerField()
-            )), 0),
+        # -------- Expresión de minutos por clase --------
+        minutos_expr = ExpressionWrapper(
+            F("clases__bloque_inicio__duracion_min") * F("clases__bloques_duracion"),
+            output_field=IntegerField(),
         )
 
-        # Construcción de objetos ligeros para serializer
-        payload = []
-        for g in qs:
-            payload.append(type("GRow", (), {
-                "id": g.id,
-                "codigo": g.codigo,
-                "periodo_id": g.periodo_id,
-                "turno_id": g.turno_id,
-                "asignatura": g.asignatura,
-                "minutos_teo": g.minutos_teo,
-                "minutos_pra": g.minutos_pra,
-                "bloques_teo": g.bloques_teo,
-                "bloques_pra": g.bloques_pra,
-            })())
+        # -------- Anotaciones (con filtros dentro de cada Sum) --------
+        qs = qs.annotate(
+            # Programado (T)
+            bloques_teo=Coalesce(
+                Sum("clases__bloques_duracion",
+                    filter=Q(clases__tipo="T") & cal_q & tol_q,
+                    output_field=IntegerField()),
+                0
+            ),
+            minutos_teo=Coalesce(
+                Sum(minutos_expr,
+                    filter=Q(clases__tipo="T") & cal_q & tol_q,
+                    output_field=IntegerField()),
+                0
+            ),
+            # Programado (P)
+            bloques_pra=Coalesce(
+                Sum("clases__bloques_duracion",
+                    filter=Q(clases__tipo="P") & cal_q & tol_q,
+                    output_field=IntegerField()),
+                0
+            ),
+            minutos_pra=Coalesce(
+                Sum(minutos_expr,
+                    filter=Q(clases__tipo="P") & cal_q & tol_q,
+                    output_field=IntegerField()),
+                0
+            ),
+            # Requeridos desde Asignatura (tipados a float)
+            req_teo_horas=Coalesce(
+                Cast(F("asignatura__horas_teoria_semana"), FloatField()),
+                Value(0.0), output_field=FloatField()
+            ),
+            req_pra_horas=Coalesce(
+                Cast(F("asignatura__horas_practica_semana"), FloatField()),
+                Value(0.0), output_field=FloatField()
+            ),
+        ).order_by("id")
 
-        # Serializar
+        # -------- Armar payload simple --------
         serializer_input = []
-        for row in payload:
+        for g in qs:
             serializer_input.append({
-                "grupo": row.id,
-                "codigo": row.codigo,
-                "periodo": row.periodo_id,
-                "turno": row.turno_id,
+                "grupo": g.id,
+                "codigo": g.codigo,
+                "periodo": g.periodo_id,
+                "turno": g.turno_id,
                 "asignatura": {
-                    "id": row.asignatura.id,
-                    "codigo": row.asignatura.codigo,
-                    "nombre": row.asignatura.nombre,
+                    "id": g.asignatura.id,
+                    "codigo": g.asignatura.codigo,
+                    "nombre": g.asignatura.nombre,
+                    # si tu serializer lee de aquí:
+                    "horas_teoria_semana": float(g.req_teo_horas or 0.0),
+                    "horas_practica_semana": float(g.req_pra_horas or 0.0),
                 },
-                "minutos_teo": row.minutos_teo,
-                "minutos_pra": row.minutos_pra,
-                "bloques_teo": row.bloques_teo,
-                "bloques_pra": row.bloques_pra,
+                "minutos_teo": int(g.minutos_teo or 0),
+                "minutos_pra": int(g.minutos_pra or 0),
+                "bloques_teo": int(g.bloques_teo or 0),
+                "bloques_pra": int(g.bloques_pra or 0),
+                # y/o explícito:
+                "requeridos": {
+                    "teoria_horas_semana": float(g.req_teo_horas or 0.0),
+                    "practica_horas_semana": float(g.req_pra_horas or 0.0),
+                },
             })
 
+        # Si tu serializer espera objetos con atributos:
         from types import SimpleNamespace
         rows = [SimpleNamespace(**d) for d in serializer_input]
 
@@ -133,11 +156,11 @@ class GrupoPlanificacionListAPIView(APIView):
         )
         return Response(ser.data, status=status.HTTP_200_OK)
 
-
 class ClasesDeGrupoListAPIView(APIView):
     """
     Lista todas las clases de un grupo dado. Con `expand=labels` incluye metadatos legibles.
     """
+
     # permission_classes = [IsAuthenticated]
 
     @extend_schema(
@@ -148,15 +171,25 @@ class ClasesDeGrupoListAPIView(APIView):
             "`asignatura`, `grupo`, `docente`, `ambiente`, `bloque_inicio_orden` y `rango_hora`."
         ),
         parameters=[
-            OpenApiParameter(name="id", type=OpenApiTypes.INT, location=OpenApiParameter.PATH,
-                             description="ID del grupo"),
-            OpenApiParameter(name="expand", type=OpenApiTypes.STR, required=False,
-                             description="Usar `labels` para incluir metadatos legibles (labels)"),
+            OpenApiParameter(
+                name="id",
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.PATH,
+                description="ID del grupo",
+            ),
+            OpenApiParameter(
+                name="expand",
+                type=OpenApiTypes.STR,
+                required=False,
+                description="Usar `labels` para incluir metadatos legibles (labels)",
+            ),
         ],
         responses={
-            200: OpenApiResponse(response=ClaseDetailSerializer(many=True),
-                                 description="Listado de clases (sin labels). "
-                                             "Con `expand=labels` se devuelven también labels."),
+            200: OpenApiResponse(
+                response=ClaseDetailSerializer(many=True),
+                description="Listado de clases (sin labels). "
+                "Con `expand=labels` se devuelven también labels.",
+            ),
         },
         tags=["Scheduling"],
         operation_id="clases_de_grupo_list",
@@ -179,6 +212,7 @@ class ClasesBulkCreateAPIView(APIView):
     """
     Crea múltiples clases en bloque. **`docente` es opcional** (se admite omitir o `null`).
     """
+
     # permission_classes = [IsAuthenticated]
 
     @extend_schema(
@@ -191,8 +225,10 @@ class ClasesBulkCreateAPIView(APIView):
         request=ClaseBulkCreateRequestSerializer,
         responses={
             201: BulkCreateResponseSerializer,
-            409: OpenApiResponse(response=BulkCreateResponseSerializer,
-                                 description="Ninguna clase creada. Conflictos/errores reportados."),
+            409: OpenApiResponse(
+                response=BulkCreateResponseSerializer,
+                description="Ninguna clase creada. Conflictos/errores reportados.",
+            ),
         },
         tags=["Scheduling"],
         operation_id="clases_bulk_create",
@@ -228,6 +264,7 @@ class ClasesBulkUpdateAPIView(APIView):
     """
     Actualiza múltiples clases en bloque (parcial, vía `updates[].set`).
     """
+
     # permission_classes = [IsAuthenticated]
 
     @extend_schema(
@@ -235,8 +272,10 @@ class ClasesBulkUpdateAPIView(APIView):
         request=ClaseBulkUpdateRequestSerializer,
         responses={
             200: BulkUpdateResponseSerializer,
-            409: OpenApiResponse(response=BulkUpdateResponseSerializer,
-                                 description="Ninguna clase actualizada. Errores reportados."),
+            409: OpenApiResponse(
+                response=BulkUpdateResponseSerializer,
+                description="Ninguna clase actualizada. Errores reportados.",
+            ),
         },
         tags=["Scheduling"],
         operation_id="clases_bulk_update",
@@ -283,6 +322,7 @@ class ClasesBulkDeleteAPIView(APIView):
     """
     Elimina múltiples clases en bloque.
     """
+
     # permission_classes = [IsAuthenticated]
 
     @extend_schema(
@@ -298,7 +338,9 @@ class ClasesBulkDeleteAPIView(APIView):
         ser.is_valid(raise_exception=True)
         ids: List[int] = ser.validated_data["ids"]
 
-        existing_ids = set(Clase.objects.filter(id__in=ids).values_list("id", flat=True))
+        existing_ids = set(
+            Clase.objects.filter(id__in=ids).values_list("id", flat=True)
+        )
         not_found = [i for i in ids if i not in existing_ids]
 
         deleted_count, _ = Clase.objects.filter(id__in=existing_ids).delete()

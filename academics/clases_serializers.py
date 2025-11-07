@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from django.utils import timezone
 from rest_framework import serializers
@@ -37,46 +37,88 @@ class GrupoPlanificacionSerializer(serializers.Serializer):
     programado = serializers.SerializerMethodField()
     estado = serializers.SerializerMethodField()
 
+    # ----------------- Helpers robustos -----------------
     def _minutos_a_horas(self, minutos: int) -> float:
         return round(minutos / 60.0, 2)
 
-    def get_requeridos(self, obj) -> Dict[str, Any]:
-        teo_h = float(getattr(obj.asignatura, "horas_teoria_semana", 0) or 0)
-        pra_h = float(getattr(obj.asignatura, "horas_practica_semana", 0) or 0)
+    def _get_attr(self, obj, name, default=None):
+        """Lee atributo tanto de object-like (modelo/namespace) como de dict."""
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    def _get_float(self, obj, name, default=0.0) -> float:
+        v = self._get_attr(obj, name, default)
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _get_int(self, obj, name, default=0) -> int:
+        v = self._get_attr(obj, name, default)
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _leer_requeridos(self, obj) -> Dict[str, float]:
+        """
+        Prioridad:
+        1) Annotates en el root: req_teo_horas / req_pra_horas
+        2) Campos en 'asignatura' (dict o modelo): horas_teoria_semana / horas_practica_semana
+        """
+        # 1) Annotates (root)
+        if (hasattr(obj, "req_teo_horas") or (isinstance(obj, dict) and "req_teo_horas" in obj)):
+            teo_h = self._get_float(obj, "req_teo_horas", 0.0)
+            pra_h = self._get_float(obj, "req_pra_horas", 0.0)
+            return {
+                "teoria_horas_semana": teo_h,
+                "practica_horas_semana": pra_h,
+            }
+
+        # 2) Fallback: desde asignatura (modelo o dict)
+        asig = self._get_attr(obj, "asignatura", {}) or {}
+        teo_h = self._get_float(asig, "horas_teoria_semana", 0.0)
+        pra_h = self._get_float(asig, "horas_practica_semana", 0.0)
         return {
             "teoria_horas_semana": teo_h,
             "practica_horas_semana": pra_h,
         }
 
+    # ----------------- Campos calculados -----------------
+    def get_requeridos(self, obj) -> Dict[str, Any]:
+        return self._leer_requeridos(obj)
+
     def get_programado(self, obj) -> Dict[str, Any]:
-        mt = int(getattr(obj, "minutos_teo", 0) or 0)
-        mp = int(getattr(obj, "minutos_pra", 0) or 0)
-        bt = int(getattr(obj, "bloques_teo", 0) or 0)
-        bp = int(getattr(obj, "bloques_pra", 0) or 0)
+        mt = self._get_int(obj, "minutos_teo", 0)
+        mp = self._get_int(obj, "minutos_pra", 0)
+        bt = self._get_int(obj, "bloques_teo", 0)
+        bp = self._get_int(obj, "bloques_pra", 0)
         return {
-            "teoria": {"bloques": bt, "minutos": mt, "horas": self._minutos_a_horas(mt)},
+            "teoria":   {"bloques": bt, "minutos": mt, "horas": self._minutos_a_horas(mt)},
             "practica": {"bloques": bp, "minutos": mp, "horas": self._minutos_a_horas(mp)},
         }
 
     def get_estado(self, obj) -> Dict[str, str]:
         tolerancia_min = int(self.context.get("tolerancia_min", 0) or 0)
 
-        req_teo_h = float(getattr(obj.asignatura, "horas_teoria_semana", 0) or 0)
-        req_pra_h = float(getattr(obj.asignatura, "horas_practica_semana", 0) or 0)
-        req_teo_min = int(req_teo_h * 60)
-        req_pra_min = int(req_pra_h * 60)
+        reqs = self._leer_requeridos(obj)
+        req_teo_min = int((reqs.get("teoria_horas_semana") or 0) * 60)
+        req_pra_min = int((reqs.get("practica_horas_semana") or 0) * 60)
 
-        prog_teo_min = int(getattr(obj, "minutos_teo", 0) or 0)
-        prog_pra_min = int(getattr(obj, "minutos_pra", 0) or 0)
+        prog_teo_min = self._get_int(obj, "minutos_teo", 0)
+        prog_pra_min = self._get_int(obj, "minutos_pra", 0)
 
         def cmp(prog, req):
-            if prog < req - tolerancia_min:
+            if prog < req - 120:
                 return "BAJO"
-            if prog > req + tolerancia_min:
+            if prog > req + 120:
                 return "EXCESO"
             return "OK"
 
-        return {"teoria": cmp(prog_teo_min, req_teo_min), "practica": cmp(prog_pra_min, req_pra_min)}
+        return {"teoria": cmp(prog_teo_min, req_teo_min),
+                "practica": cmp(prog_pra_min, req_pra_min)}
+
 
 
 # ----------------- CLASES: DETAIL + LABELS -----------------

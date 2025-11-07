@@ -146,7 +146,6 @@ def assign_role_view(request):
 # ===== HU003: CRUD Docentes =====
 @extend_schema(tags=["docentes"], responses={200: DocenteSerializer(many=True)})
 @api_view(["GET"])
-@permission_classes([IsAuthenticated, IsManagerOrStaff])
 def docentes_list_view(request):
     qs = Docente.objects.all().order_by("nombre_completo")
     activo = request.query_params.get("activo")
