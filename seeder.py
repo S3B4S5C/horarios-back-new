@@ -3,7 +3,6 @@ import os
 import sys
 from datetime import date, time, timedelta, datetime
 
-# === AJUSTA ESTO SI TU SETTINGS CAMBIA ===
 DJANGO_SETTINGS_MODULE = os.environ.get("DJANGO_SETTINGS_MODULE", "horarios.settings")
 
 def setup_django():
@@ -41,25 +40,62 @@ def main():
 
     print(f"Usando settings: {DJANGO_SETTINGS_MODULE}")
     with transaction.atomic():
-        # --- Usuarios base ---
-        admin, _ = User.objects.get_or_create(username="admin", defaults=dict(email="admin@uni.edu"))
-        if not admin.has_usable_password():
-            admin.set_password("Secreta123"); admin.is_staff=True; admin.is_superuser=True; admin.save()
+        # --- Superuser base ---
+        admin, created = User.objects.get_or_create(
+            username="admin",
+            defaults={"email": "admin@uni.edu"},
+        )
+        # siempre aseguramos contraseña y flags, aunque ya exista
+        if created or not admin.has_usable_password():
+            admin.set_password("Secreta123")
+        if not admin.is_staff:
+            admin.is_staff = True
+        if not admin.is_superuser:
+            admin.is_superuser = True
+        admin.save()
 
         def create_user(u, email, role, nombre=None, password="Secreta123"):
-            user, created = User.objects.get_or_create(username=u, defaults=dict(email=email))
+            """
+            Crea/actualiza usuario + UserProfile con rol dado.
+            Idempotente: si ya existe, asegura password usable y rol correcto.
+            """
+            user, created = User.objects.get_or_create(
+                username=u,
+                defaults={"email": email},
+            )
             if created or not user.has_usable_password():
                 user.set_password(password)
                 user.save()
-            prof, _ = UserProfile.objects.get_or_create(user=user, defaults={"role": role})
+
+            prof, _ = UserProfile.objects.get_or_create(
+                user=user,
+                defaults={"role": role},
+            )
             if prof.role != role:
-                prof.role = role; prof.save(update_fields=["role"])
+                prof.role = role
+                prof.save(update_fields=["role"])
+
             return user
 
-        # Jefatura / Autoridades
+        # Autoridades / admins de app
         u_jefe = create_user("jefe", "jefe@uni.edu", UserRole.JEFE_CARRERA)
         u_vicer = create_user("vicer", "vicer@uni.edu", UserRole.VICERRECTORADO)
         u_rector = create_user("rector", "rector@uni.edu", UserRole.RECTOR)
+
+        # Nuevos: admin1 y admin2 como RECTOR
+        u_admin1 = create_user("admin1", "admin1@uni.edu", UserRole.RECTOR)
+        u_admin2 = create_user("admin2", "admin2@uni.edu", UserRole.RECTOR)
+
+        for u in (u_admin1, u_admin2):
+            changed = False
+            if not u.is_staff:
+                u.is_staff = True
+                changed = True
+            if not u.is_superuser:
+                u.is_superuser = True
+                changed = True
+            if changed:
+                u.save()
 
         # Docentes
         u_d1 = create_user("doc1", "doc1@uni.edu", UserRole.DOCENTE)
@@ -96,6 +132,9 @@ def main():
                 activo=True,
             ),
         )
+
+        # ... (resto del seeder igual)
+
 
         # Estudiantes (mínimo para HU010/inscripciones)
         estudiantes = []
