@@ -192,10 +192,12 @@ def docentes_update_view(request, pk: int):
 @permission_classes([IsAuthenticated, IsManagerOrStaff])
 def docentes_delete_view(request, pk: int):
     try:
-        obj = Docente.objects.get(pk=pk)
+        docente = Docente.objects.select_related("user").get(pk=pk)
     except Docente.DoesNotExist:
         return Response({"detail": "No encontrado."}, status=404)
-    obj.delete()
+
+    docente.user.delete()
+
     return Response(status=204)
 
 
